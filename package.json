@@ -1,0 +1,8 @@
+{
+  "name": "spicy-media-analyzer",
+  "version": "1.0.0",
+  "description": "Spicy Media CRO Site Analyzer",
+  "engines": {
+    "node": ">=18"
+  }
+}
