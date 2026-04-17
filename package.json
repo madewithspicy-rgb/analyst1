@@ -2,7 +2,9 @@
   "name": "spicy-media-analyzer",
   "version": "1.0.0",
   "description": "Spicy Media CRO Site Analyzer",
-  "engines": {
-    "node": ">=18"
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "docx": "^9.6.1",
+    "@netlify/blobs": "^8.1.0"
   }
 }
