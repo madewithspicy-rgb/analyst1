@@ -56,6 +56,19 @@ async function fetchSiteText(url) {
   } catch { return ''; }
 }
 
+async function pollJob(jobId) {
+  const maxAttempts = 60;
+  for (let i = 0; i < maxAttempts; i++) {
+    await delay(3000);
+    const r = await fetch('/.netlify/functions/job-status?jobId=' + jobId);
+    if (!r.ok) continue;
+    const job = await r.json();
+    if (job.status === 'done') return job;
+    if (job.status === 'error') throw new Error(job.error || 'Ошибка анализа');
+  }
+  throw new Error('Таймаут — попробуйте ещё раз');
+}
+
 async function runAnalysis() {
   const url = document.getElementById('urlInput').value.trim();
   if (!url || !url.startsWith('http')) { showError('Введите корректный URL (начинается с https://)'); return; }
@@ -71,11 +84,8 @@ async function runAnalysis() {
     setStep(1, 'Загружаем страницу...');
     const siteText = await fetchSiteText(url);
 
-    setStep(2, 'Читаем структуру сайта...');
-    await delay(200);
-    setStep(3, 'Формируем правки...');
-
-    const resp = await fetch('/.netlify/functions/analyze', {
+    setStep(2, 'Запускаем анализ...');
+    const resp = await fetch('/.netlify/functions/analyze-bg', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -86,23 +96,25 @@ async function runAnalysis() {
       }),
     });
 
-    setStep(4, 'Финализируем документ...');
-
     if (!resp.ok) {
       const e = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
-      throw new Error(e.error || 'Ошибка сервера: ' + resp.status);
+      throw new Error(e.error || 'Ошибка запуска');
     }
 
-    const data = await resp.json();
-    fullRawResult = data.raw || '';
-    lastParsed = data.parsed;
+    const { jobId } = await resp.json();
 
+    setStep(3, 'Claude анализирует сайт... (~30 сек)');
+    const job = await pollJob(jobId);
+
+    fullRawResult = job.raw || '';
+    lastParsed = job.parsed;
+
+    setStep(4, 'Готово!');
     document.getElementById('progressFill').style.width = '100%';
-    document.getElementById('progressMsg').textContent = 'Готово!';
 
     setTimeout(() => {
       document.getElementById('progressCard').style.display = 'none';
-      renderResults(data.parsed, url);
+      renderResults(job.parsed, url);
       btn.disabled = false;
       document.querySelector('.btn-scan-text').textContent = 'Анализировать';
     }, 500);
@@ -146,7 +158,6 @@ function renderResults(d, url) {
 
   document.getElementById('assessmentCard').textContent = d.overall_assessment || '';
 
-  // Blocks tab
   const blocks = d.blocks || [];
   const newBlocks = d.new_blocks || [];
   let recsHtml = '';
@@ -158,9 +169,7 @@ function renderResults(d, url) {
     recsHtml += '<div class="rec-top"><span class="rec-num">Блок ' + (b.number||'') + '</span>';
     recsHtml += '<span class="rec-section">' + escHtml(b.name||'') + '</span>';
     recsHtml += '<span style="font-size:11px;padding:3px 9px;border-radius:20px;background:' + pColor + '22;color:' + pColor + ';border:1px solid ' + pColor + '44;">' + pLabel + '</span></div>';
-    if (b.current_problem) {
-      recsHtml += '<div style="font-size:13px;color:#E8401A;margin-bottom:10px;"><strong>Проблема:</strong> ' + escHtml(b.current_problem) + '</div>';
-    }
+    if (b.current_problem) recsHtml += '<div style="font-size:13px;color:#E8401A;margin-bottom:10px;"><strong>Проблема:</strong> ' + escHtml(b.current_problem) + '</div>';
     (b.changes||[]).forEach(ch => {
       recsHtml += '<div style="margin-bottom:12px;">';
       recsHtml += '<div style="font-size:13px;font-weight:500;color:var(--text);margin-bottom:4px;">▸ ' + escHtml(ch.element||'') + '</div>';
@@ -191,17 +200,15 @@ function renderResults(d, url) {
 
   document.getElementById('pane-recs').innerHTML = recsHtml;
 
-  // Copy tab - all EN texts
   const allCopies = [];
   blocks.forEach(b => (b.changes||[]).forEach(ch => { if (ch.copy_en) allCopies.push({ section: 'Блок ' + b.number + ' — ' + b.name, element: ch.element, copy: ch.copy_en }); }));
   newBlocks.forEach(b => (b.content||[]).forEach(item => { if (item.copy_en) allCopies.push({ section: 'Новый блок ' + b.number + ' — ' + b.name, element: item.element, copy: item.copy_en }); }));
   document.getElementById('pane-copy').innerHTML = allCopies.length
     ? allCopies.map(c => '<div class="copy-card"><div class="copy-source">' + escHtml(c.section) + ' / ' + escHtml(c.element||'') + '</div><div class="copy-text">' + escHtml(c.copy) + '</div></div>').join('')
-    : '<p style="color:var(--text3);font-size:13px;padding:8px 0;">Добавьте контекст о нише для точных формулировок.</p>';
+    : '<p style="color:var(--text3);font-size:13px;padding:8px 0;">Добавьте контекст для точных формулировок.</p>';
 
-  // Tasks
   const tasks = d.tasks || [];
-  const bClass = w => { const wl = (w||'').toLowerCase(); if (wl.includes('designer')||wl.includes('дизайн')) return 'who-designer'; if (wl.includes('developer')||wl.includes('разработ')) return 'who-developer'; return 'who-pm'; };
+  const bClass = w => { const wl=(w||'').toLowerCase(); if(wl.includes('designer')||wl.includes('дизайн')) return 'who-designer'; if(wl.includes('developer')||wl.includes('разработ')) return 'who-developer'; return 'who-pm'; };
   document.getElementById('pane-tasks').innerHTML = tasks.length
     ? '<div class="tasks-list">' + tasks.map(t => '<div class="task-row"><span class="task-badge ' + bClass(t.who) + '">' + escHtml(t.who||'') + '</span><span class="task-text">' + escHtml(t.task||'') + '</span></div>').join('') + '</div>'
     : '<p style="color:var(--text3);font-size:13px;">Задачи не сформированы.</p>';
@@ -226,8 +233,7 @@ function escHtml(str) {
 function copyDoc() {
   navigator.clipboard.writeText(fullRawResult).then(() => {
     const b = document.querySelector('.results-actions .btn-ghost');
-    const orig = b.textContent;
-    b.textContent = 'Скопировано!';
+    const orig = b.textContent; b.textContent = 'Скопировано!';
     setTimeout(() => b.textContent = orig, 2000);
   });
 }
@@ -236,8 +242,7 @@ async function downloadDocx() {
   if (!lastParsed) return;
   const btn = event.target;
   const orig = btn.textContent;
-  btn.textContent = 'Генерируем...';
-  btn.disabled = true;
+  btn.textContent = 'Генерируем...'; btn.disabled = true;
   try {
     const resp = await fetch('/.netlify/functions/generate-docx', {
       method: 'POST',
@@ -246,30 +251,24 @@ async function downloadDocx() {
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    if (!data.docx) throw new Error('No docx in response');
+    if (!data.docx) throw new Error('No docx');
     const binary = atob(data.docx);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    const name = (lastParsed.site_name || 'site').replace(/[^a-zA-Zа-яА-Я0-9]/g, '_');
-    a.download = 'spicy_recs_' + name + '.docx';
+    a.download = 'spicy_recs_' + (lastParsed.site_name || 'site').replace(/[^a-zA-Zа-яА-Я0-9]/g, '_') + '.docx';
     a.click();
-  } catch (err) {
-    showError('Ошибка генерации docx: ' + err.message);
-  }
-  btn.textContent = orig;
-  btn.disabled = false;
+  } catch (err) { showError('Ошибка генерации docx: ' + err.message); }
+  btn.textContent = orig; btn.disabled = false;
 }
 
 function downloadTxt() {
   const url = document.getElementById('urlInput').value.replace(/https?:\/\//,'').replace(/[\/?.=]/g,'_');
   const blob = new Blob([fullRawResult], { type: 'text/plain;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'spicy_recs_' + (url || 'site') + '.txt';
-  a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'spicy_recs_' + (url || 'site') + '.txt'; a.click();
 }
 
 function resetForm() {
