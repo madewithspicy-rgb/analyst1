@@ -1,17 +1,14 @@
 let fullRawResult = '';
+let lastParsed = null;
 let knowledgeBaseText = '';
 let manualOpen = false;
 
 const uploadZone = document.getElementById('uploadZone');
-
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('has-file'); });
 uploadZone.addEventListener('dragleave', () => { if (!knowledgeBaseText) uploadZone.classList.remove('has-file'); });
-uploadZone.addEventListener('drop', e => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file) processFile(file); });
+uploadZone.addEventListener('drop', e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) processFile(f); });
 
-function handleFile(event) {
-  const file = event.target.files[0];
-  if (file) processFile(file);
-}
+function handleFile(e) { const f = e.target.files[0]; if (f) processFile(f); }
 
 function processFile(file) {
   if (file.size > 5 * 1024 * 1024) { showError('Файл слишком большой. Максимум 5 МБ.'); return; }
@@ -44,25 +41,19 @@ function showError(msg) {
   document.getElementById('errorText').textContent = msg;
   document.getElementById('errorCard').style.display = 'flex';
 }
-
 function hideError() { document.getElementById('errorCard').style.display = 'none'; }
 
 async function fetchSiteText(url) {
-  // Try allorigins proxy to get site HTML
   try {
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const resp = await fetch(proxyUrl);
-    if (!resp.ok) throw new Error('proxy failed');
-    const data = await resp.json();
-    const html = data.contents || '';
-    // Strip tags, get readable text
+    const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url));
+    if (!r.ok) return '';
+    const data = await r.json();
     const tmp = document.createElement('div');
-    tmp.innerHTML = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-                        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+    tmp.innerHTML = (data.contents || '')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
     return (tmp.innerText || tmp.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 5000);
-  } catch {
-    return '';
-  }
+  } catch { return ''; }
 }
 
 async function runAnalysis() {
@@ -81,7 +72,7 @@ async function runAnalysis() {
     const siteText = await fetchSiteText(url);
 
     setStep(2, 'Читаем структуру сайта...');
-    await delay(300);
+    await delay(200);
     setStep(3, 'Формируем правки...');
 
     const resp = await fetch('/.netlify/functions/analyze', {
@@ -98,12 +89,13 @@ async function runAnalysis() {
     setStep(4, 'Финализируем документ...');
 
     if (!resp.ok) {
-      const errData = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-      throw new Error(errData.error || `Ошибка сервера: ${resp.status}`);
+      const e = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
+      throw new Error(e.error || 'Ошибка сервера: ' + resp.status);
     }
 
     const data = await resp.json();
     fullRawResult = data.raw || '';
+    lastParsed = data.parsed;
 
     document.getElementById('progressFill').style.width = '100%';
     document.getElementById('progressMsg').textContent = 'Готово!';
@@ -127,7 +119,7 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function renderResults(d, url) {
   if (!d) {
-    document.getElementById('pane-raw').innerHTML = `<pre class="raw-pre">${escHtml(fullRawResult)}</pre>`;
+    document.getElementById('pane-raw').innerHTML = '<pre class="raw-pre">' + escHtml(fullRawResult) + '</pre>';
     switchTab('raw', document.querySelector('.tab[data-tab="raw"]'));
     document.getElementById('resultsSection').style.display = 'block';
     return;
@@ -142,50 +134,79 @@ function renderResults(d, url) {
     d.detected_tone && { label: 'Тон', val: d.detected_tone },
     d.detected_key_value && { label: 'Ценность', val: d.detected_key_value },
   ].filter(Boolean);
-
   document.getElementById('contextChips').innerHTML = chips.map(c =>
-    `<div class="chip"><strong>${c.label}:</strong> ${escHtml(c.val)}</div>`
+    '<div class="chip"><strong>' + c.label + ':</strong> ' + escHtml(c.val) + '</div>'
   ).join('');
 
   const score = Math.min(10, Math.max(1, parseInt(d.conversion_score) || 5));
-  document.getElementById('scoreRow').innerHTML = `
-    <span class="score-label">Конверсионность:</span>
-    <div class="score-bars">${Array.from({length:10},(_,i)=>`<div class="score-bar${i<score?' filled':''}"></div>`).join('')}</div>
-    <span class="score-num">${score}/10</span>`;
+  document.getElementById('scoreRow').innerHTML =
+    '<span class="score-label">Конверсионность:</span>' +
+    '<div class="score-bars">' + Array.from({length:10},(_,i)=>'<div class="score-bar'+(i<score?' filled':'')+'"></div>').join('') + '</div>' +
+    '<span class="score-num">' + score + '/10</span>';
 
   document.getElementById('assessmentCard').textContent = d.overall_assessment || '';
 
-  const recs = d.recommendations || [];
-  document.getElementById('pane-recs').innerHTML = recs.map(r => `
-    <div class="rec-card">
-      <div class="rec-top">
-        <span class="rec-num">#${r.id||''}</span>
-        ${r.section ? `<span class="rec-section">${escHtml(r.section)}</span>` : ''}
-        <span class="badge-${r.priority||'medium'}">${r.priority==='high'?'🔴 Высокий':r.priority==='medium'?'🟡 Средний':'🟢 Низкий'}</span>
-      </div>
-      <div class="rec-title">${escHtml(r.title||'')}</div>
-      <div class="rec-action">${escHtml(r.action||'')}</div>
-      ${r.copy_en?`<div class="rec-copy"><div class="rec-copy-label">Текст (American English)</div><div class="rec-copy-text">${escHtml(r.copy_en)}</div></div>`:''}
-    </div>`).join('');
+  // Blocks tab
+  const blocks = d.blocks || [];
+  const newBlocks = d.new_blocks || [];
+  let recsHtml = '';
 
-  const withCopy = recs.filter(r => r.copy_en);
-  document.getElementById('pane-copy').innerHTML = withCopy.length
-    ? withCopy.map(r=>`<div class="copy-card"><div class="copy-source">${escHtml(r.section||'')} — ${escHtml(r.title||'')}</div><div class="copy-text">${escHtml(r.copy_en)}</div></div>`).join('')
+  blocks.forEach(b => {
+    const pColor = b.priority === 'high' ? '#E8401A' : b.priority === 'medium' ? '#F59E0B' : '#22C55E';
+    const pLabel = b.priority === 'high' ? 'Высокий' : b.priority === 'medium' ? 'Средний' : 'Низкий';
+    recsHtml += '<div class="rec-card">';
+    recsHtml += '<div class="rec-top"><span class="rec-num">Блок ' + (b.number||'') + '</span>';
+    recsHtml += '<span class="rec-section">' + escHtml(b.name||'') + '</span>';
+    recsHtml += '<span style="font-size:11px;padding:3px 9px;border-radius:20px;background:' + pColor + '22;color:' + pColor + ';border:1px solid ' + pColor + '44;">' + pLabel + '</span></div>';
+    if (b.current_problem) {
+      recsHtml += '<div style="font-size:13px;color:#E8401A;margin-bottom:10px;"><strong>Проблема:</strong> ' + escHtml(b.current_problem) + '</div>';
+    }
+    (b.changes||[]).forEach(ch => {
+      recsHtml += '<div style="margin-bottom:12px;">';
+      recsHtml += '<div style="font-size:13px;font-weight:500;color:var(--text);margin-bottom:4px;">▸ ' + escHtml(ch.element||'') + '</div>';
+      if (ch.action) recsHtml += '<div class="rec-action" style="margin-left:14px;">' + escHtml(ch.action) + '</div>';
+      if (ch.copy_en) recsHtml += '<div class="rec-copy"><div class="rec-copy-label">EN copy</div><div class="rec-copy-text">' + escHtml(ch.copy_en) + '</div></div>';
+      recsHtml += '</div>';
+    });
+    recsHtml += '</div>';
+  });
+
+  if (newBlocks.length) {
+    recsHtml += '<div style="font-size:12px;font-weight:500;color:#22C55E;letter-spacing:.08em;text-transform:uppercase;margin:24px 0 12px;padding-top:16px;border-top:1px solid var(--border);">+ Новые блоки</div>';
+    newBlocks.forEach(b => {
+      recsHtml += '<div class="rec-card" style="border-color:rgba(34,197,94,0.25)">';
+      recsHtml += '<div class="rec-top"><span class="rec-num">Блок ' + (b.number||'') + '</span>';
+      recsHtml += '<span class="rec-section">' + escHtml(b.name||'') + '</span>';
+      recsHtml += '<span style="font-size:11px;padding:3px 9px;border-radius:20px;background:rgba(34,197,94,0.1);color:#22C55E;border:1px solid rgba(34,197,94,0.2);">Добавить</span></div>';
+      if (b.reason) recsHtml += '<div style="font-size:13px;color:#22C55E;margin-bottom:10px;"><strong>Зачем:</strong> ' + escHtml(b.reason) + '</div>';
+      (b.content||[]).forEach(item => {
+        recsHtml += '<div style="margin-bottom:10px;">';
+        recsHtml += '<div style="font-size:13px;font-weight:500;color:var(--text);margin-bottom:4px;">▸ ' + escHtml(item.element||'') + '</div>';
+        if (item.copy_en) recsHtml += '<div class="rec-copy"><div class="rec-copy-label" style="color:#22C55E;">EN copy</div><div class="rec-copy-text" style="background:rgba(34,197,94,0.05);">' + escHtml(item.copy_en) + '</div></div>';
+        recsHtml += '</div>';
+      });
+      recsHtml += '</div>';
+    });
+  }
+
+  document.getElementById('pane-recs').innerHTML = recsHtml;
+
+  // Copy tab - all EN texts
+  const allCopies = [];
+  blocks.forEach(b => (b.changes||[]).forEach(ch => { if (ch.copy_en) allCopies.push({ section: 'Блок ' + b.number + ' — ' + b.name, element: ch.element, copy: ch.copy_en }); }));
+  newBlocks.forEach(b => (b.content||[]).forEach(item => { if (item.copy_en) allCopies.push({ section: 'Новый блок ' + b.number + ' — ' + b.name, element: item.element, copy: item.copy_en }); }));
+  document.getElementById('pane-copy').innerHTML = allCopies.length
+    ? allCopies.map(c => '<div class="copy-card"><div class="copy-source">' + escHtml(c.section) + ' / ' + escHtml(c.element||'') + '</div><div class="copy-text">' + escHtml(c.copy) + '</div></div>').join('')
     : '<p style="color:var(--text3);font-size:13px;padding:8px 0;">Добавьте контекст о нише для точных формулировок.</p>';
 
+  // Tasks
   const tasks = d.tasks || [];
-  const badgeClass = who => {
-    if (!who) return 'who-pm';
-    const w = who.toLowerCase();
-    if (w.includes('designer')||w.includes('дизайн')) return 'who-designer';
-    if (w.includes('developer')||w.includes('разработ')||w.includes('верст')) return 'who-developer';
-    return 'who-pm';
-  };
+  const bClass = w => { const wl = (w||'').toLowerCase(); if (wl.includes('designer')||wl.includes('дизайн')) return 'who-designer'; if (wl.includes('developer')||wl.includes('разработ')) return 'who-developer'; return 'who-pm'; };
   document.getElementById('pane-tasks').innerHTML = tasks.length
-    ? `<div class="tasks-list">${tasks.map(t=>`<div class="task-row"><span class="task-badge ${badgeClass(t.who)}">${escHtml(t.who||'')}</span><span class="task-text">${escHtml(t.task||'')}</span></div>`).join('')}</div>`
+    ? '<div class="tasks-list">' + tasks.map(t => '<div class="task-row"><span class="task-badge ' + bClass(t.who) + '">' + escHtml(t.who||'') + '</span><span class="task-text">' + escHtml(t.task||'') + '</span></div>').join('') + '</div>'
     : '<p style="color:var(--text3);font-size:13px;">Задачи не сформированы.</p>';
 
-  document.getElementById('pane-raw').innerHTML = `<pre class="raw-pre">${escHtml(JSON.stringify(d,null,2))}</pre>`;
+  document.getElementById('pane-raw').innerHTML = '<pre class="raw-pre">' + escHtml(JSON.stringify(d, null, 2)) + '</pre>';
   document.getElementById('resultsSection').style.display = 'block';
   document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -194,7 +215,7 @@ function switchTab(name, btn) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   if (btn) btn.classList.add('active');
-  else document.querySelector(`.tab[data-tab="${name}"]`)?.classList.add('active');
+  else document.querySelector('.tab[data-tab="' + name + '"]')?.classList.add('active');
   document.getElementById('pane-' + name)?.classList.add('active');
 }
 
@@ -204,25 +225,57 @@ function escHtml(str) {
 
 function copyDoc() {
   navigator.clipboard.writeText(fullRawResult).then(() => {
-    const btn = document.querySelector('.results-actions .btn-ghost');
-    btn.textContent = 'Скопировано!';
-    setTimeout(() => btn.textContent = 'Скопировать', 2000);
+    const b = document.querySelector('.results-actions .btn-ghost');
+    const orig = b.textContent;
+    b.textContent = 'Скопировано!';
+    setTimeout(() => b.textContent = orig, 2000);
   });
 }
 
-function downloadDoc() {
+async function downloadDocx() {
+  if (!lastParsed) return;
+  const btn = event.target;
+  const orig = btn.textContent;
+  btn.textContent = 'Генерируем...';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/.netlify/functions/generate-docx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: lastParsed }),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (!data.docx) throw new Error('No docx in response');
+    const binary = atob(data.docx);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    const name = (lastParsed.site_name || 'site').replace(/[^a-zA-Zа-яА-Я0-9]/g, '_');
+    a.download = 'spicy_recs_' + name + '.docx';
+    a.click();
+  } catch (err) {
+    showError('Ошибка генерации docx: ' + err.message);
+  }
+  btn.textContent = orig;
+  btn.disabled = false;
+}
+
+function downloadTxt() {
   const url = document.getElementById('urlInput').value.replace(/https?:\/\//,'').replace(/[\/?.=]/g,'_');
   const blob = new Blob([fullRawResult], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `spicy_recs_${url||'site'}.txt`;
+  a.download = 'spicy_recs_' + (url || 'site') + '.txt';
   a.click();
 }
 
 function resetForm() {
   document.getElementById('urlInput').value = '';
   document.getElementById('resultsSection').style.display = 'none';
-  knowledgeBaseText = '';
+  knowledgeBaseText = ''; lastParsed = null;
   uploadZone.classList.remove('has-file');
   document.getElementById('uploadText').textContent = 'Перетащите файл или нажмите';
   document.getElementById('uploadSub').textContent = 'PDF · TXT · DOCX · MD — до 5 МБ';
